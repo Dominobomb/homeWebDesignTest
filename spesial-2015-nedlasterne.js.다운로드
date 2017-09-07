@@ -1,0 +1,592 @@
+'use strict';
+
+!(function($) {
+    var IS_CHROME = (!!window.chrome && /google/i.test(navigator.vendor));
+    var HEADER_OFFSET = 55;
+    var playersLoading = 0;
+    var relatedEnabled = window.vg.lang === 'nb';
+    var trackingEnabled = vg.data.env === 'production';
+    var navBarState = null;
+
+    $(document).ready(function() {
+        updateNavBarState(0, 0);
+
+        $("#head").html(ich.headTemplate(vg.data.doc));
+        $("#chapters").html(ich.chaptersTemplate(vg.data.doc));
+        $("#downloader-overview").html(ich.downloaderOverviewTemplate(vg.data.downloaders));
+        $("#her-bor-mennene").html(ich.downloadmapTemplate());
+        $("#fildelingen-grafikk").html(ich.fildelingenTemplate());
+        $("#metode-grafikk").html(ich.metodeTemplate());
+        $("#verdenskart-grafikk").html(ich.verdenTemplate());
+        $(".aside-kaja-hegg").html(ich.kajaTemplate());
+        $(".aside-aasland").html(ich.aaslandTemplate());
+        $(".aside-forbehold").html(ich.forbeholdTemplate());
+        $("#hjelp").html(ich.hjelpTemplate());
+        $("#torry").html(ich.commentTemplate(vg.data.doc.torry));
+
+        $( '#fildelingen, .section-comment .comment, #verdensliste, #metoden' ).each(function( index ) {
+            $(this).addClass("bio-hidden");
+        });
+
+
+        $('#fildelingen, #metoden, .section-comment .comment, #verdensliste').click(function(e) {
+            $( this ).parent().find('.more').css({
+                'display':'none'
+            });
+            $( this ).removeClass("bio-hidden");
+        });
+
+        $('.more').click(function(e) {
+            $( this ).css({
+                'display':'none'
+            });
+            $( this ).parent().find('#fildelingen, #metoden, .comment, #verdensliste').removeClass("bio-hidden");
+        });
+
+        $(document.body).addClass('rendered');
+    });
+
+    $(window).load(function() {
+        addVideoPlayers();
+        initPhotoSwipeFromDOM('.image-gallery');
+        $.localScroll({offset: -HEADER_OFFSET});
+        addInViewListeners();
+        addModalListeners();
+        openDownloaderModalIfNecessary();
+        scrollToParams();
+        trackEngageView();
+        addCountryGradient();
+        fetchRelated();
+    });
+
+    function addCountryGradient() {
+        var values = $("#verdensliste dl > dt").map(function() { return +$(this).text().replace(/\D/, ''); });
+        var max = Math.max.apply(null, values);
+
+        $("#verdensliste dl > dd").each(function(i) {
+            var val = 100 - (values[i] / max) * 100;
+
+            $(this).css('background', 'linear-gradient(to left, #fff 0%,#fff ' + val + '%,#cfcfcf ' + val + '%,#cfcfcf 100%)')
+        });
+    }
+
+    function addInViewListeners() {
+        $('section').each(function() {
+            var el = $(this);
+            var chapterIndex = el.data('chapter-index');
+            var waypointIndex = el.data('waypoint-index');
+
+            var inview = new Waypoint.Inview({
+                element: this,
+                continuous: false,
+                offset: '50%',
+
+                enter: function(direction) {
+                    // console.log('Enter triggered with direction ' + direction, el.attr('id'))
+                },
+
+                entered: function(direction) {
+                    // console.log('Entered triggered with direction ' + direction, el.attr('id'), this.group.name)
+                    updateNavBarState(chapterIndex, waypointIndex);
+                },
+                exit: function(direction) {
+                    // console.log('Exit triggered with direction ' + direction, el.attr('id'), this.group.name)
+                },
+                exited: function(direction) {
+                    // console.log('Exited triggered with direction ' + direction, el.attr('id'), this.group.name)
+                }
+            })
+        });
+    }
+
+    function fetchRelated() {
+        if (!relatedEnabled) {
+            return false;
+        }
+
+        $.ajax({
+            dataType: 'json',
+            url: 'related.php?count=3',
+            success: function(data) {
+                $("#related-articles").html(ich.relatedArticlesTemplate(data));
+            }
+        })
+    }
+
+    function handlePlayersReady() {}
+
+    function scrollToParams() {
+        var params = queryParams();
+        var hash = null;
+
+        if (params.chapter) {
+            hash = '#chapter-' + params.chapter;
+        } else if (params.waypoint) {
+            hash = '#' + params.waypoint;
+        }
+
+        if (hash) {
+            $.scrollTo($(hash), {offset: -HEADER_OFFSET, axis: 'y'});
+        }
+    }
+
+    function renderNavBar() {
+        var content = $("#navbar-content");
+
+        content.html(ich.navbarContentTemplate(navBarState));
+        content.localScroll({offset: -HEADER_OFFSET});
+    }
+
+    function addModalListeners() {
+        $(document.body).delegate('a.open-modal', 'click', function(e) {
+            openDownloaderModal($(this).data('downloader-id').toString());
+        });
+
+        $("#downloader-modal").on('hidden.bs.modal', function(e) {
+            if (window.location.hash.match(/modal/)) {
+                cleanUrl();
+            }
+        });
+    }
+
+    function queryParams() {
+        var match,
+              pl     = /\+/g,  // Regex for replacing addition symbol with a space
+              search = /([^&=]+)=?([^&]*)/g,
+              decode = function (s) { return decodeURIComponent(s.replace(pl, " ")); },
+              query  = window.location.search.substring(1),
+              urlParams = {};
+
+          while (match = search.exec(query)) {
+             urlParams[decode(match[1])] = decode(match[2]);
+          }
+
+         return urlParams;
+    }
+
+    function updateNavBarState(chapterIndex, waypointIndex) {
+        if (typeof chapterIndex === 'undefined' || typeof waypointIndex === 'undefined') {
+            return;
+        }
+
+        var chapters = vg.data.doc.chapters;
+
+        chapterIndex = chapterIndex || 0;
+        waypointIndex = waypointIndex || 0;
+
+        if (!navBarState || chapterIndex !== navBarState.chapterIndex || waypointIndex !== navBarState.waypointIndex) {
+            var params = queryParams();
+
+            if (navBarState && (
+                (params.chapter && +params.chapterIndex !== chapterIndex)
+                ||
+                (params.waypoint && +params.waypointIndex !== waypointIndex)
+            )) {
+                // cleanUrl({search: true});
+            }
+
+            var activeChapter = chapters[chapterIndex];
+            var activeWaypoint = activeChapter.index[waypointIndex];
+            var waypoints = activeChapter.index.map(function(w, i) {
+                return { waypoint: w, active: i === waypointIndex};
+            });
+
+            navBarState = {
+                chapterIndex: chapterIndex,
+                waypointIndex: waypointIndex,
+                activeChapter: activeChapter,
+                chapters: chapters.map(function(c, i) {
+                    return {chapter: c, active: i === chapterIndex};
+                }),
+
+                activeWaypoint: activeChapter.isPublished ? activeWaypoint : null,
+                waypoints: activeChapter.isPublished ? waypoints : []
+            };
+        }
+
+        renderNavBar();
+    }
+
+    function cleanUrl(opts) {
+        var scrollV, scrollH, loc = window.location;
+
+        if ('pushState' in history) {
+            var path = opts && opts.search ? loc.pathname : loc.pathname + loc.search;
+            history.pushState('', document.title, path);
+        } else {
+            // Prevent scrolling by storing the page's current scroll offset
+            scrollV = document.body.scrollTop;
+            scrollH = document.body.scrollLeft;
+
+            if (opts && opts.search) {
+                loc.search = "";
+            }
+
+            loc.hash = "";
+
+            // Restore the scroll offset, should be flicker free
+            document.body.scrollTop = scrollV;
+            document.body.scrollLeft = scrollH;
+        }
+    }
+
+    function addVideoPlayers(root) {
+        root = root || $(document.body);
+
+        root.find('.video').each(function() {
+            var el = $(this);
+            var id = el.data('vgtv');
+
+            if (this.__svp) {
+                // console.log('already added SVP, ignoring', el, id);
+                return;
+            }
+
+            // console.log('creating video player', el, id);
+
+            var settings = {
+                preview: true,
+                na: window.vg.lang === 'en',
+                // poster: poster,
+                // title: $('meta[property="og:description"]').text(),
+                // bgPlay: true
+            };
+
+            if (IS_CHROME) {
+                // work around https://code.google.com/p/chromium/issues/detail?id=129733 by forcing HTML5 in Chrome
+                // we don't do it for all browser since it may mean reduced quality (e.g. Safari).
+                settings.mode = 'html5';
+            }
+
+            playersLoading++;
+
+            this.__svp = SVP.Player.load(id, {
+                vendor: 'vgtv',
+                node: this,
+                skin: 'fluid',
+                autoplay: false,
+                settings: settings,
+                related: false
+            });
+
+
+            this.__svp.on('ready', function() {
+                playersLoading--;
+
+                if (playersLoading === 0) {
+                    handlePlayersReady();
+                }
+            });
+        });
+    };
+
+    function trackEngageView () {
+        var url = $('meta[property="og:url"]').attr('content');
+
+        // https://github.schibsted.io/spt-mediaplatform/engage-sdk-js/blob/master/api.md
+        var params = {
+            site: 'VG',
+            title: 'Nedlasterne',
+            device: window.vg.device,
+            permalink: url,
+            articleId: 23533704,
+            group: 'Nyheter',
+            published: '2015-10-02T20:00:00+02:00',
+            updated: vg.data.lastUpdatedAt,
+            authors: [ // i.e. who will get this in "My Articles"
+                'Hakon.Fostervold.Hoydal@vg.no',
+                'einar.otto.stangvik@vg.no',
+                'Natalie.Remoe.Hansen@vg.no',
+                'tom.byermoen@vg.no',
+                'jari.bakken@vg.no'
+            ],
+            wordCount: countWords($('p').text()),
+            previewUrl: {
+                http: url + '?forcedevice=mobile-smartphone',
+                https: url.replace('http', 'https') + '?forcedevice=mobile-smartphone',
+            }
+        };
+
+        var engage = new Engage(params);
+
+        if (trackingEnabled) {
+            engage.initialize();
+        }
+    };
+
+    function openDownloaderModalIfNecessary() {
+        var hash = window.location.hash.slice(1);
+
+        if (!hash.length) {
+            return;
+        }
+
+        var md = hash.match(/^modal-(\d+|remaining)/);
+
+        if (md) {
+            openDownloaderModal(md[1]);
+        }
+    };
+
+    function openDownloaderModal(downloaderId) {
+        var modal = $('#downloader-modal')
+
+        var downloaders = vg.data.downloaders.downloaders;
+        var downloader, remaining;
+
+        var nav = downloaders.filter(function(d) { return d.visited; })
+
+        if (downloaderId === 'remaining') {
+            remaining = downloaders.filter(function(d) { return !d.visited; });
+        } else {
+            for (var i = downloaders.length - 1; i >= 0; i--) {
+                var d = downloaders[i];
+                if (d.id === downloaderId) {
+                    downloader = d;
+                    break;
+                }
+            };
+        }
+
+        if (downloader) {
+            nav = nav.map(function(d) { return {active: downloader.id === d.id, downloader: d}; });
+        } else {
+            nav = nav.map(function(d) { return {active: false, downloader: d}; });
+        }
+
+        if (downloader || remaining) {
+            // destroy existing video player
+            modal.find('.video').each(function() {
+                if (this.__svp) {
+                    this.__svp.destroy();
+                }
+            });
+
+            var html = ich.downloaderModalTemplate({nav: nav, focused: downloader, remaining: remaining, isRemaining: !!remaining});
+            modal.html(html).modal('show').focus();
+
+            addVideoPlayers(modal);
+        } else {
+            console.error('could not find downloader with ' + JSON.stringify({id: downloaderId}));
+        }
+    };
+
+    function countWords(s){
+        s = s.replace(/(^\s*)|(\s*$)/gi,"");//exclude  start and end white-space
+        s = s.replace(/[ ]{2,}/gi," ");//2 or more space to 1
+        s = s.replace(/\n /, "\n"); // exclude newline with a start spacing
+
+        var tokens = s.split(' ').filter(function(e) { return e.length && e !== "\n"; });
+        return tokens.length;
+    };
+
+    function initPhotoSwipeFromDOM(gallerySelector) {
+
+        // parse slide data (url, title, size ...) from DOM elements
+        // (children of gallerySelector)
+        var parseThumbnailElements = function(el) {
+            var thumbElements = el.childNodes,
+                numNodes = thumbElements.length,
+                items = [],
+                figureEl,
+                linkEl,
+                size,
+                item;
+
+            for(var i = 0; i < numNodes; i++) {
+
+                figureEl = thumbElements[i]; // <figure> element
+
+                // include only element nodes
+                if(figureEl.nodeType !== 1) {
+                    continue;
+                }
+
+                linkEl = figureEl.children[0]; // <a> element
+
+                size = linkEl.getAttribute('data-size').split('x');
+
+                // create slide object
+                item = {
+                    src: linkEl.getAttribute('href'),
+                    w: parseInt(size[0], 10),
+                    h: parseInt(size[1], 10)
+                };
+
+
+
+                if(figureEl.children.length > 1) {
+                    // <figcaption> content
+                    item.title = figureEl.children[1].innerHTML;
+                }
+
+                if(linkEl.children.length > 0) {
+                    // <img> thumbnail element, retrieving thumbnail url
+                    item.msrc = linkEl.children[0].getAttribute('src');
+                }
+
+                item.el = figureEl; // save link to element for getThumbBoundsFn
+                items.push(item);
+            }
+
+            return items;
+        };
+
+        // find nearest parent element
+        var closest = function closest(el, fn) {
+            return el && ( fn(el) ? el : closest(el.parentNode, fn) );
+        };
+
+        // triggers when user clicks on thumbnail
+        var onThumbnailsClick = function(e) {
+            e = e || window.event;
+            e.preventDefault ? e.preventDefault() : e.returnValue = false;
+
+            var eTarget = e.target || e.srcElement;
+
+            // find root element of slide
+            var clickedListItem = closest(eTarget, function(el) {
+                return (el.tagName && el.tagName.toUpperCase() === 'FIGURE');
+            });
+
+            if(!clickedListItem) {
+                return;
+            }
+
+            // find index of clicked item by looping through all child nodes
+            // alternatively, you may define index via data- attribute
+            var clickedGallery = clickedListItem.parentNode,
+                childNodes = clickedListItem.parentNode.childNodes,
+                numChildNodes = childNodes.length,
+                nodeIndex = 0,
+                index;
+
+            for (var i = 0; i < numChildNodes; i++) {
+                if(childNodes[i].nodeType !== 1) {
+                    continue;
+                }
+
+                if(childNodes[i] === clickedListItem) {
+                    index = nodeIndex;
+                    break;
+                }
+                nodeIndex++;
+            }
+
+
+
+            if(index >= 0) {
+                // open PhotoSwipe if valid index found
+                openPhotoSwipe( index, clickedGallery );
+            }
+            return false;
+        };
+
+        // parse picture index and gallery index from URL (#&pid=1&gid=2)
+        var photoswipeParseHash = function() {
+            var hash = window.location.hash.substring(1),
+            params = {};
+
+            if(hash.length < 5) {
+                return params;
+            }
+
+            var vars = hash.split('&');
+            for (var i = 0; i < vars.length; i++) {
+                if(!vars[i]) {
+                    continue;
+                }
+                var pair = vars[i].split('=');
+                if(pair.length < 2) {
+                    continue;
+                }
+                params[pair[0]] = pair[1];
+            }
+
+            if(params.gid) {
+                params.gid = parseInt(params.gid, 10);
+            }
+
+            return params;
+        };
+
+        var openPhotoSwipe = function(index, galleryElement, disableAnimation, fromURL) {
+            var pswpElement = document.querySelectorAll('.pswp')[0],
+                gallery,
+                options,
+                items;
+
+            items = parseThumbnailElements(galleryElement);
+
+            // define options (if needed)
+            options = {
+
+                // define gallery index (for URL)
+                galleryUID: galleryElement.getAttribute('data-pswp-uid'),
+
+                getThumbBoundsFn: function(index) {
+                    // See Options -> getThumbBoundsFn section of documentation for more info
+                    var thumbnail = items[index].el.getElementsByTagName('img')[0], // find thumbnail
+                        pageYScroll = window.pageYOffset || document.documentElement.scrollTop,
+                        rect = thumbnail.getBoundingClientRect();
+
+                    return {x:rect.left, y:rect.top + pageYScroll, w:rect.width};
+                }
+
+            };
+
+            // PhotoSwipe opened from URL
+            if(fromURL) {
+                if(options.galleryPIDs) {
+                    // parse real index when custom PIDs are used
+                    // http://photoswipe.com/documentation/faq.html#custom-pid-in-url
+                    for(var j = 0; j < items.length; j++) {
+                        if(items[j].pid == index) {
+                            options.index = j;
+                            break;
+                        }
+                    }
+                } else {
+                    // in URL indexes start from 1
+                    options.index = parseInt(index, 10) - 1;
+                }
+            } else {
+                options.index = parseInt(index, 10);
+            }
+
+            // exit if index not found
+            if( isNaN(options.index) ) {
+                return;
+            }
+
+            if(disableAnimation) {
+                options.showAnimationDuration = 0;
+            }
+
+            // Pass data to PhotoSwipe and initialize it
+            gallery = new PhotoSwipe( pswpElement, PhotoSwipeUI_Default, items, options);
+            gallery.init();
+        };
+
+        // loop through all gallery elements and bind events
+        var galleryElements = document.querySelectorAll( gallerySelector );
+
+        for(var i = 0, l = galleryElements.length; i < l; i++) {
+            galleryElements[i].setAttribute('data-pswp-uid', i+1);
+            galleryElements[i].onclick = onThumbnailsClick;
+        }
+
+        // Parse URL and open gallery if it contains #&pid=3&gid=1
+        var hashData = photoswipeParseHash();
+        if(hashData.pid && hashData.gid) {
+            openPhotoSwipe( hashData.pid ,  galleryElements[ hashData.gid - 1 ], true, true );
+        }
+    };
+})(jQuery);
+
+function fbShare(url, winWidth, winHeight) {
+    var winTop = (screen.height / 2) - (winHeight / 2);
+    var winLeft = (screen.width / 2) - (winWidth / 2);
+    window.open('http://www.facebook.com/sharer.php?u=' + url, 'sharer', 'top=' + winTop + ',left=' + winLeft + ',toolbar=0,status=0,width='+winWidth+',height='+winHeight);
+}
+
